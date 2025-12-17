@@ -253,6 +253,7 @@ class Download:
         block_size: int | None,
         p_task: TaskID,
         progress_to_stdout: bool,
+        event_stop: Event | None = None,
     ) -> tuple[bool, list[DownloadSegmentResult]]:
         """Download all segments with progress reporting and abort handling.
 
@@ -262,6 +263,7 @@ class Download:
             block_size (int | None): Block size for streaming.
             p_task (TaskID): Progress bar task ID.
             progress_to_stdout (bool): Whether to show progress in stdout.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
             tuple[bool, list[DownloadSegmentResult]]: (result_segments, list of segment results)
@@ -298,8 +300,8 @@ class Download:
 
                         self.fn_logger.error("Something went wrong while downloading. File is corrupt!")
 
-                    # If app is terminated (CTRL+C)
-                    if self.event_abort.is_set():
+                    # If app is terminated (CTRL+C) or item stopped
+                    if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
                         # Cancel all not yet started tasks
                         for f in l_futures:
                             f.cancel()
@@ -353,6 +355,7 @@ class Download:
         media: Track | Video,
         path_file: pathlib.Path,
         stream_manifest: StreamManifest | None = None,
+        event_stop: Event | None = None,
     ) -> tuple[bool, pathlib.Path]:
         """Download a media item (track or video), handling segments and merging.
 
@@ -360,6 +363,7 @@ class Download:
             media (Track | Video): The media item to download.
             path_file (pathlib.Path): Path to the output file.
             stream_manifest (StreamManifest | None, optional): Stream manifest for tracks. Defaults to None.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
             tuple[bool, pathlib.Path]: (Success, path to downloaded or decrypted file)
@@ -385,7 +389,7 @@ class Download:
             return False, path_file
 
         result_segments, dl_segment_results = self._download_segments(
-            urls, path_file.parent, block_size, p_task, progress_to_stdout
+            urls, path_file.parent, block_size, p_task, progress_to_stdout, event_stop
         )
 
         result_merge, tmp_path_file_decrypted = self._download_postprocess(
@@ -537,6 +541,7 @@ class Download:
         is_parent_album: bool = False,
         list_position: int = 0,
         list_total: int = 0,
+        event_stop: Event | None = None,
     ) -> tuple[bool, pathlib.Path | str]:
         """Download a single media item, handling file naming, skipping, and post-processing.
 
@@ -552,16 +557,25 @@ class Download:
             is_parent_album (bool, optional): Whether this is a parent album. Defaults to False.
             list_position (int, optional): Position in list. Defaults to 0.
             list_total (int, optional): Total items in list. Defaults to 0.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
             tuple[bool, pathlib.Path | str]: (Downloaded, path to file)
         """
+        # Check for stop signal before doing anything
+        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+            return False, ""
+
         # Step 1: Validate and prepare media
         validated_media = self._validate_and_prepare_media(media, media_id, media_type, video_download)
         if validated_media is None or not isinstance(validated_media, Track | Video):
             return False, ""
 
         media = validated_media
+
+        # Check for stop signal
+        if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
+            return False, ""
 
         # Step 2: Create file paths and determine skip logic
         path_media_dst, file_extension_dummy, skip_file, skip_download = self._prepare_file_paths_and_skip_logic(
@@ -578,7 +592,12 @@ class Download:
 
         # Step 4: Download and process media
         download_success = self._download_and_process_media(
-            media, path_media_dst, skip_download, is_parent_album, file_extension_dummy
+            media,
+            path_media_dst,
+            skip_download,
+            is_parent_album,
+            file_extension_dummy,
+            event_stop,
         )
 
         # Step 5: Post-processing
@@ -591,6 +610,7 @@ class Download:
             quality_video_old,
             download_delay,
             skip_file,
+            event_stop,
         )
 
         return download_success, path_media_dst
@@ -767,6 +787,7 @@ class Download:
         skip_download: bool,
         is_parent_album: bool,
         file_extension_dummy: str,
+        event_stop: Event | None = None,
     ) -> bool:
         """Download and process media file.
 
@@ -776,6 +797,7 @@ class Download:
             skip_download (bool): Whether to skip download.
             is_parent_album (bool): Whether this is a parent album.
             file_extension_dummy (str): Dummy file extension.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
             bool: Whether download was successful.
@@ -798,7 +820,13 @@ class Download:
 
         # Perform actual download
         return self._perform_actual_download(
-            media, path_media_dst, stream_manifest, do_flac_extract, is_parent_album, media_stream
+            media,
+            path_media_dst,
+            stream_manifest,
+            do_flac_extract,
+            is_parent_album,
+            media_stream,
+            event_stop,
         )
 
     def _get_stream_info(self, media: Track | Video) -> tuple[StreamManifest | None, str, bool, Stream | None]:
@@ -933,6 +961,7 @@ class Download:
         do_flac_extract: bool,
         is_parent_album: bool,
         media_stream: Stream | None,
+        event_stop: Event | None = None,
     ) -> bool:
         """Perform the actual download and processing.
 
@@ -943,6 +972,7 @@ class Download:
             do_flac_extract (bool): Whether to extract FLAC.
             is_parent_album (bool): Whether this is a parent album.
             media_stream (Stream | None): Media stream.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
             bool: Whether download was successful.
@@ -954,7 +984,10 @@ class Download:
 
             # Download media.
             result_download, tmp_path_file = self._download(
-                media=media, stream_manifest=stream_manifest, path_file=tmp_path_file
+                media=media,
+                stream_manifest=stream_manifest,
+                path_file=tmp_path_file,
+                event_stop=event_stop,
             )
 
             if not result_download:
@@ -1025,6 +1058,7 @@ class Download:
         quality_video_old: QualityVideo | None,
         download_delay: bool,
         skip_file: bool,
+        event_stop: Event | None = None,
     ) -> None:
         """Perform post-processing tasks.
 
@@ -1037,6 +1071,7 @@ class Download:
             quality_video_old (QualityVideo | None): Previous video quality.
             download_delay (bool): Whether to apply download delay.
             skip_file (bool): Whether file was skipped.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
         """
         # If files needs to be symlinked, do postprocessing here.
         if self.settings.data.symlink_to_track and not isinstance(media, Video):
@@ -1052,7 +1087,7 @@ class Download:
             self.adjust_quality_video(quality_video_old)
 
         # Apply download delay if needed
-        if (download_delay and not skip_file) and not self.event_abort.is_set():
+        if download_delay and not skip_file:
             time_sleep: float = round(
                 random.SystemRandom().uniform(
                     self.settings.data.download_delay_sec_min, self.settings.data.download_delay_sec_max
@@ -1061,7 +1096,14 @@ class Download:
             )
 
             self.fn_logger.debug(f"Next download will start in {time_sleep} seconds.")
-            time.sleep(time_sleep)
+
+            # Use event_stop or event_abort for interruptible sleep
+            if event_stop:
+                event_stop.wait(time_sleep)
+            elif self.event_abort:
+                self.event_abort.wait(time_sleep)
+            else:
+                time.sleep(time_sleep)
 
     def media_move_and_symlink(
         self, media: Track | Video, path_media_src: pathlib.Path, file_extension: str
@@ -1376,7 +1418,7 @@ class Download:
             replay_gain_write=self.settings.data.metadata_replay_gain,
             upc=track.album.upc if track.album and track.album.upc else "",
             explicit=explicit,
-            bpm=track.bpm,
+            bpm=track.bpm if track.bpm else 0,
             initial_key=format_initial_key(track.key, track.key_scale, self.settings.data.initial_key_format),
         )
 
@@ -1396,6 +1438,7 @@ class Download:
         download_delay: bool = True,
         quality_audio: Quality | None = None,
         quality_video: QualityVideo | None = None,
+        event_stop: Event | None = None,
     ) -> None:
         """Download all items in an album, playlist, or mix.
 
@@ -1408,6 +1451,7 @@ class Download:
             download_delay (bool, optional): Whether to delay between downloads. Defaults to True.
             quality_audio (Quality | None, optional): Audio quality. Defaults to None.
             quality_video (QualityVideo | None, optional): Video quality. Defaults to None.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
         """
         # Validate and prepare media collection
         validated_media = self._validate_and_prepare_media(media, media_id, media_type, video_download)
@@ -1443,6 +1487,7 @@ class Download:
             progress,
             progress_task,
             progress_stdout,
+            event_stop,
         )
 
         # Create playlist file if requested
@@ -1505,6 +1550,7 @@ class Download:
         progress: Progress,
         progress_task: TaskID,
         progress_stdout: bool,
+        event_stop: Event | None = None,
     ) -> list[pathlib.Path]:
         """Execute downloads for all items in the collection.
 
@@ -1519,6 +1565,7 @@ class Download:
             progress (Progress): Progress bar instance.
             progress_task (TaskID): Progress task ID.
             progress_stdout (bool): Whether to show progress in stdout.
+            event_stop (Event | None, optional): Event to stop the download. Defaults to None.
 
         Returns:
             list[pathlib.Path]: List of result directories.
@@ -1550,6 +1597,7 @@ class Download:
                         is_parent_album=is_album,
                         list_position=count + 1,
                         list_total=list_total,
+                        event_stop=event_stop,
                     )
                     for count, item_media in enumerate(items)
                 ]
@@ -1558,50 +1606,10 @@ class Download:
                 result_dirs = self._process_download_futures(download_futures, progress, progress_task, progress_stdout)
 
                 # Check for abort signal
-                if self.event_abort.is_set():
+                if self.event_abort.is_set() or (event_stop and event_stop.is_set()):
                     return result_dirs
 
         return result_dirs
-
-    def _create_download_futures(
-        self,
-        items: list,
-        file_name_relative: str,
-        quality_audio: Quality | None,
-        quality_video: QualityVideo | None,
-        download_delay: bool,
-        is_album: bool,
-        list_total: int,
-    ) -> list[futures.Future]:
-        """Create download futures for all items in the collection.
-
-        Args:
-            items (list): List of media items to download.
-            file_name_relative (str): Relative file name template.
-            quality_audio (Quality | None): Audio quality setting.
-            quality_video (QualityVideo | None): Video quality setting.
-            download_delay (bool): Whether to apply download delay.
-            is_album (bool): Whether this is an album.
-            list_total (int): Total number of items.
-
-        Returns:
-            list[futures.Future]: List of download futures.
-        """
-        with futures.ThreadPoolExecutor(max_workers=self.settings.data.downloads_concurrent_max) as executor:
-            return [
-                executor.submit(
-                    self.item,
-                    media=item_media,
-                    file_template=file_name_relative,
-                    quality_audio=quality_audio,
-                    quality_video=quality_video,
-                    download_delay=download_delay,
-                    is_parent_album=is_album,
-                    list_position=count + 1,
-                    list_total=list_total,
-                )
-                for count, item_media in enumerate(items)
-            ]
 
     def _process_download_futures(
         self,
